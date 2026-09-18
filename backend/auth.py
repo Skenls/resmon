@@ -3,36 +3,46 @@ import hashlib
 import hmac
 import secrets
 import time
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 from fastapi import HTTPException, Request, Response, WebSocket, status
 from backend.config import get_settings
 
-# Failed login attempts tracker: client_ip -> (attempts, lock_until_timestamp)
-_failed_attempts: Dict[str, Tuple[int, float]] = {}
-MAX_FAILED_ATTEMPTS = 5
-LOCKOUT_SECONDS = 60.0
+# Failed login attempts tracker: client_ip -> list of failure timestamps
+_failed_attempts: Dict[str, List[float]] = {}
+MAX_FAILED_ATTEMPTS = 10
+WINDOW_SECONDS = 60.0
 COOKIE_NAME = "resmon_session"
 
 
-def check_rate_limit(client_ip: str) -> bool:
-    """Return True if request is allowed, False if IP is currently locked out."""
+def get_client_ip(request: Request) -> str:
+    """Extract real client IP considering proxy headers."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def is_rate_limited(client_ip: str) -> bool:
+    """Return True if client_ip has exceeded MAX_FAILED_ATTEMPTS in the last WINDOW_SECONDS."""
     now = time.time()
-    if client_ip in _failed_attempts:
-        attempts, lock_until = _failed_attempts[client_ip]
-        if lock_until > now:
-            return False
-        if lock_until <= now and attempts >= MAX_FAILED_ATTEMPTS:
-            # Lockout expired, reset
-            _failed_attempts.pop(client_ip, None)
-    return True
+    attempts = _failed_attempts.get(client_ip, [])
+    # Keep only timestamps within the sliding window
+    valid_attempts = [t for t in attempts if now - t < WINDOW_SECONDS]
+    _failed_attempts[client_ip] = valid_attempts
+    return len(valid_attempts) >= MAX_FAILED_ATTEMPTS
 
 
 def record_failed_attempt(client_ip: str) -> None:
     now = time.time()
-    attempts, _ = _failed_attempts.get(client_ip, (0, 0.0))
-    attempts += 1
-    lock_until = now + LOCKOUT_SECONDS if attempts >= MAX_FAILED_ATTEMPTS else 0.0
-    _failed_attempts[client_ip] = (attempts, lock_until)
+    attempts = _failed_attempts.get(client_ip, [])
+    valid_attempts = [t for t in attempts if now - t < WINDOW_SECONDS]
+    valid_attempts.append(now)
+    _failed_attempts[client_ip] = valid_attempts
 
 
 def reset_failed_attempts(client_ip: str) -> None:
@@ -75,12 +85,6 @@ def verify_session_token(token: str, expected_username: str, secret_key: str) ->
         return False
 
 
-def get_client_ip(request: Request) -> str:
-    if request.client:
-        return request.client.host
-    return "unknown"
-
-
 def parse_basic_auth(auth_header: str) -> Tuple[str, str]:
     """Parse 'Basic <base64>' header into username and password."""
     if not auth_header or not auth_header.startswith("Basic "):
@@ -99,6 +103,7 @@ def parse_basic_auth(auth_header: str) -> Tuple[str, str]:
 async def authenticate_http_request(request: Request, response: Response) -> bool:
     """
     Authenticate HTTP request via session cookie or HTTP Basic Auth.
+    If valid credentials are provided, always authenticates and resets failed attempts.
     If unauthenticated, returns 401 with WWW-Authenticate header to trigger
     the native browser login dialog.
     """
@@ -112,45 +117,47 @@ async def authenticate_http_request(request: Request, response: Response) -> boo
         return True
 
     client_ip = get_client_ip(request)
-    if not check_rate_limit(client_ip):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many failed login attempts. IP temporarily locked out for 60 seconds.",
-        )
 
     # 2. Check HTTP Basic Auth header
     auth_header = request.headers.get("Authorization", "")
     username, password = parse_basic_auth(auth_header)
 
-    if not username:
+    # 3. If credentials were provided, verify them first
+    if username:
+        user_match = secrets.compare_digest(username, settings.AUTH_USERNAME)
+        pass_match = secrets.compare_digest(password, settings.AUTH_PASSWORD)
+
+        if user_match and pass_match:
+            # Legitimate user: reset failed counter, issue session token, and allow immediately
+            reset_failed_attempts(client_ip)
+            session_token = create_session_token(settings.AUTH_USERNAME, settings.SECRET_KEY)
+            request.state.session_token = session_token
+            response.set_cookie(
+                key=COOKIE_NAME,
+                value=session_token,
+                httponly=True,
+                samesite="lax",
+                max_age=86400,
+            )
+            return True
+
+    # 4. Check if client IP is currently rate limited
+    if is_rate_limited(client_ip):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
-            headers={"WWW-Authenticate": 'Basic realm="ResMon"'},
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. IP temporarily locked out for 60 seconds.",
         )
 
-    user_match = secrets.compare_digest(username, settings.AUTH_USERNAME)
-    pass_match = secrets.compare_digest(password, settings.AUTH_PASSWORD)
-
-    if not (user_match and pass_match):
+    # 5. Record the failed attempt if invalid credentials were provided
+    if username:
         record_failed_attempt(client_ip)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": 'Basic realm="ResMon"'},
-        )
 
-    # Login successful: reset failed counter and set secure session cookie
-    reset_failed_attempts(client_ip)
-    session_token = create_session_token(settings.AUTH_USERNAME, settings.SECRET_KEY)
-    response.set_cookie(
-        key=COOKIE_NAME,
-        value=session_token,
-        httponly=True,
-        samesite="lax",
-        max_age=86400,
+    # 6. Challenge with 401 (browser popup)
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
+        headers={"WWW-Authenticate": 'Basic realm="ResMon"'},
     )
-    return True
 
 
 def authenticate_websocket(websocket: WebSocket) -> bool:

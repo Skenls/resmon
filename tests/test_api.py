@@ -1,6 +1,15 @@
 import pytest
 from fastapi.testclient import TestClient
 from backend.main import app
+from backend.config import get_settings
+
+@pytest.fixture(autouse=True)
+def disable_auth():
+    settings = get_settings()
+    orig = settings.AUTH_ENABLED
+    settings.AUTH_ENABLED = False
+    yield
+    settings.AUTH_ENABLED = orig
 
 def test_health():
     with TestClient(app) as client:

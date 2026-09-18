@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.config import get_settings
 
+from backend.auth import reset_failed_attempts
+
 @pytest.fixture(autouse=True)
 def configure_auth():
     settings = get_settings()
@@ -14,12 +16,14 @@ def configure_auth():
     settings.AUTH_ENABLED = True
     settings.AUTH_USERNAME = "admin"
     settings.AUTH_PASSWORD = "secretpassword"
+    reset_failed_attempts("testclient")
 
     yield
 
     settings.AUTH_ENABLED = orig_enabled
     settings.AUTH_USERNAME = orig_user
     settings.AUTH_PASSWORD = orig_pass
+    reset_failed_attempts("testclient")
 
 def test_unauthorized_request_returns_401_challenge():
     with TestClient(app) as client:
@@ -68,12 +72,19 @@ def test_websocket_with_authenticated_session_cookie():
 def test_bruteforce_lockout():
     with TestClient(app) as client:
         auth_header = "Basic " + base64.b64encode(b"admin:wrongpass").decode()
-        for _ in range(5):
+        for _ in range(10):
             res = client.get("/api/info", headers={"Authorization": auth_header})
             assert res.status_code == 401
 
-        # 6th attempt should be rate-limited with 429
+        # 11th attempt should be rate-limited with 429
         res = client.get("/api/info", headers={"Authorization": auth_header})
         assert res.status_code == 429
         assert "locked out" in res.json()["detail"]
+
+        # Legitimate user with valid credentials should still be able to log in and reset lockout!
+        valid_auth = "Basic " + base64.b64encode(b"admin:secretpassword").decode()
+        res_valid = client.get("/api/info", headers={"Authorization": valid_auth})
+        assert res_valid.status_code == 200
+        assert "hostname" in res_valid.json()
+
 

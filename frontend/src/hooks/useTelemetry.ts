@@ -18,12 +18,12 @@ export function useTelemetry() {
 
   // 1. Fetch static system info
   useEffect(() => {
-    fetch('/api/info')
+    fetch('/api/info', { credentials: 'same-origin' })
       .then((res) => res.json())
       .then((data) => setStaticInfo(data))
       .catch((err) => console.error('Failed to load system info:', err));
 
-    fetch('/api/history')
+    fetch('/api/history', { credentials: 'same-origin' })
       .then((res) => res.json())
       .then((data: Snapshot[]) => {
         if (Array.isArray(data) && data.length > 0) {

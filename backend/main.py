@@ -137,15 +137,27 @@ async def websocket_metrics(websocket: WebSocket):
         connected_clients.discard(websocket)
 
 
+from backend.auth import authenticate_http_request, authenticate_websocket, COOKIE_NAME
+from fastapi import Depends, Request, status
+
+
 # Mount frontend distribution directory if built
 dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../frontend/dist"))
 if os.path.isdir(dist_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(dist_dir, "assets")), name="assets")
 
     @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str, auth: bool = Depends(authenticate_http_request)):
+    async def serve_spa(request: Request, full_path: str, auth: bool = Depends(authenticate_http_request)):
         file_path = os.path.join(dist_dir, full_path)
-        if os.path.exists(file_path) and os.path.isfile(file_path):
-            return FileResponse(file_path)
-        return FileResponse(os.path.join(dist_dir, "index.html"))
+        target = file_path if (os.path.exists(file_path) and os.path.isfile(file_path)) else os.path.join(dist_dir, "index.html")
+        resp = FileResponse(target)
+        if hasattr(request.state, "session_token"):
+            resp.set_cookie(
+                key=COOKIE_NAME,
+                value=request.state.session_token,
+                httponly=True,
+                samesite="lax",
+                max_age=86400,
+            )
+        return resp
 

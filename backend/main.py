@@ -77,23 +77,27 @@ app.add_middleware(
 )
 
 
+from backend.auth import authenticate_http_request, authenticate_websocket
+from fastapi import Depends, status
+
+
 @app.get("/api/health")
-async def get_health():
+async def get_health(auth: bool = Depends(authenticate_http_request)):
     return {"status": "ok"}
 
 
 @app.get("/api/info")
-async def get_info():
+async def get_info(auth: bool = Depends(authenticate_http_request)):
     return collector.get_static_info()
 
 
 @app.get("/api/history")
-async def get_history():
+async def get_history(auth: bool = Depends(authenticate_http_request)):
     return buffer.get_history()
 
 
 @app.get("/api/snapshot")
-async def get_snapshot():
+async def get_snapshot(auth: bool = Depends(authenticate_http_request)):
     latest = buffer.get_latest()
     if latest is None:
         latest = collector.collect_snapshot()
@@ -102,6 +106,10 @@ async def get_snapshot():
 
 @app.websocket("/ws/metrics")
 async def websocket_metrics(websocket: WebSocket):
+    if not authenticate_websocket(websocket):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await websocket.accept()
     connected_clients.add(websocket)
 
@@ -118,7 +126,6 @@ async def websocket_metrics(websocket: WebSocket):
 
     try:
         while True:
-            # Keep socket open and receive any client-side control commands (e.g. ping/pause)
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text("pong")
@@ -136,8 +143,9 @@ if os.path.isdir(dist_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(dist_dir, "assets")), name="assets")
 
     @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
+    async def serve_spa(full_path: str, auth: bool = Depends(authenticate_http_request)):
         file_path = os.path.join(dist_dir, full_path)
         if os.path.exists(file_path) and os.path.isfile(file_path):
             return FileResponse(file_path)
         return FileResponse(os.path.join(dist_dir, "index.html"))
+

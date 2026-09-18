@@ -22,6 +22,10 @@ services:
       - HOST_PROC=${HOST_PROC:-/host/proc}
       - HOST_SYS=${HOST_SYS:-/host/sys}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - AUTH_ENABLED=${AUTH_ENABLED:-false}
+      - AUTH_USERNAME=${AUTH_USERNAME:-admin}
+      - AUTH_PASSWORD=${AUTH_PASSWORD:-}
+      - SECRET_KEY=${SECRET_KEY:-resmon-default-secret-change-in-production}
     deploy:
       resources:
         limits:

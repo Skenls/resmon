@@ -11,6 +11,12 @@ class Settings(BaseSettings):
     HOST_SYS: str = "/host/sys" if os.path.exists("/host/sys") else "/sys"
     LOG_LEVEL: str = "info"
 
+    # Authentication settings
+    AUTH_ENABLED: bool = False
+    AUTH_USERNAME: str = "admin"
+    AUTH_PASSWORD: str = ""
+    SECRET_KEY: str = "resmon-default-secret-change-in-production"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 _settings: Optional[Settings] = None

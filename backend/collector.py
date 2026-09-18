@@ -46,6 +46,10 @@ class SystemMetricsCollector:
         self.host_proc = self.settings.HOST_PROC
         self.host_sys = self.settings.HOST_SYS
 
+        # Point psutil to host procfs when running in container on Linux
+        if os.path.isdir(self.host_proc) and hasattr(psutil, "PROCFS_PATH"):
+            psutil.PROCFS_PATH = self.host_proc
+
         self._last_time = time.time()
 
         # Initialize psutil counters

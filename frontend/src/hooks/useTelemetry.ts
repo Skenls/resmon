@@ -124,7 +124,7 @@ export function useTelemetry() {
         // tab backgrounded
       } else {
         // refresh history on foreground
-        fetch('/api/history')
+        fetch('/api/history', { credentials: 'same-origin' })
           .then((res) => res.json())
           .then((data: Snapshot[]) => {
             if (Array.isArray(data) && data.length > 0) {

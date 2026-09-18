@@ -3,5 +3,6 @@ uvicorn[standard]>=0.32.0
 psutil>=6.1.0
 pydantic-settings>=2.6.0
 pytest>=8.3.0
+pytest-timeout>=2.4.0
 httpx>=0.28.0
 websockets>=13.1

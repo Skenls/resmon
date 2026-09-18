@@ -1,0 +1,27 @@
+services:
+  resmon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: resmon_web
+    restart: unless-stopped
+    # Use host network and host PID namespace for direct host telemetry with zero overhead
+    network_mode: "host"
+    pid: "host"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+    environment:
+      - PORT=${PORT:-8080}
+      - HOST=${HOST:-0.0.0.0}
+      - UPDATE_INTERVAL=${UPDATE_INTERVAL:-1.0}
+      - HISTORY_POINTS=${HISTORY_POINTS:-900}
+      - HOST_PROC=${HOST_PROC:-/host/proc}
+      - HOST_SYS=${HOST_SYS:-/host/sys}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: 128M

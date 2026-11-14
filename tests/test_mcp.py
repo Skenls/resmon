@@ -38,17 +38,18 @@ def test_downsample_noop_for_small_series():
     assert sampled == points
 
 
-def test_journal_command_uses_mounted_dirs(tmp_path):
+def test_journal_command_uses_mounted_root(tmp_path):
+    persistent = tmp_path / "var" / "log" / "journal"
+    volatile = tmp_path / "run" / "log" / "journal"
+    persistent.mkdir(parents=True)
+    volatile.mkdir(parents=True)
     settings = Settings(
-        HOST_JOURNAL_DIR=str(tmp_path / "persistent"),
-        HOST_RUN_JOURNAL_DIR=str(tmp_path / "volatile"),
+        HOST_JOURNAL_DIR=str(persistent),
+        HOST_RUN_JOURNAL_DIR=str(volatile),
     )
-    (tmp_path / "persistent").mkdir()
-    (tmp_path / "volatile").mkdir()
 
     command = _journal_command(settings, 50, "docker")
 
     assert command[:4] == ["journalctl", "--no-pager", "--output=short-iso", "--lines"]
-    assert "--directory" in command
-    assert str(tmp_path / "persistent") in command
+    assert command[5:7] == ["--root", str(tmp_path)]
     assert command[-2:] == ["--unit", "docker"]

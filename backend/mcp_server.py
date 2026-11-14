@@ -52,6 +52,28 @@ def _journal_dirs(settings: Settings) -> List[str]:
     ]
 
 
+def _journal_file_count(directory: str) -> int:
+    return sum(
+        1
+        for _, _, files in os.walk(directory)
+        for name in files
+        if name.endswith((".journal", ".journal~"))
+    )
+
+
+def _journal_root(settings: Settings) -> Optional[str]:
+    """journalctl accepts only one --directory; a common root reads both paths."""
+    journal_dir = settings.HOST_JOURNAL_DIR.rstrip("/")
+    run_dir = settings.HOST_RUN_JOURNAL_DIR.rstrip("/")
+    if not journal_dir.endswith("/var/log/journal") or not run_dir.endswith("/run/log/journal"):
+        return None
+    journal_root = journal_dir[: -len("/var/log/journal")]
+    run_root = run_dir[: -len("/run/log/journal")]
+    if journal_root != run_root:
+        return None
+    return journal_root or "/"
+
+
 def _journal_command(settings: Settings, lines: int, unit: Optional[str]) -> List[str]:
     command = [
         "journalctl",
@@ -60,8 +82,13 @@ def _journal_command(settings: Settings, lines: int, unit: Optional[str]) -> Lis
         "--lines",
         str(lines),
     ]
-    for directory in _journal_dirs(settings):
-        command.extend(["--directory", directory])
+    root = _journal_root(settings)
+    if root and root != "/":
+        command.extend(["--root", root])
+    else:
+        dirs = _journal_dirs(settings)
+        if dirs:
+            command.extend(["--directory", max(dirs, key=_journal_file_count)])
     if unit:
         command.extend(["--unit", unit])
     return command
@@ -179,13 +206,8 @@ def create_mcp(buffer: MetricsBuffer, settings: Settings):
         }
         if not entries:
             dirs = _journal_dirs(settings)
-            journal_files = sum(
-                1
-                for directory in dirs
-                for _, _, files in os.walk(directory)
-                for name in files
-                if name.endswith((".journal", ".journal~"))
-            )
+            journal_files = sum(_journal_file_count(directory) for directory in dirs)
+            result["journal_root"] = _journal_root(settings)
             result["journal_dirs"] = dirs
             result["journal_files"] = journal_files
             if not dirs:
@@ -202,7 +224,7 @@ def create_mcp(buffer: MetricsBuffer, settings: Settings):
             else:
                 result["hint"] = (
                     "Journal files exist but journalctl returned no entries; "
-                    "check container permissions or machine-id filtering."
+                    "check read permissions on the mounted directory."
                 )
         if completed.returncode != 0 and completed.stderr.strip():
             result["error"] = completed.stderr.strip()[:2000]

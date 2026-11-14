@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile
     container_name: resmon_web
     restart: unless-stopped
+    networks:
+      - default
+      - caddy
     ports:
       # Loopback only: Caddy on the same host terminates TLS and proxies here.
       - "${BIND_ADDR:-127.0.0.1}:${PORT:-8080}:${PORT:-8080}"
@@ -36,7 +39,8 @@ services:
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
       - COOKIE_SECURE=${COOKIE_SECURE:-false}
       - MAX_WS_CLIENTS=${MAX_WS_CLIENTS:-100}
-      - MAX_WS_CLIENTS=${MAX_WS_CLIENTS:-100}
+      # resmon is only reachable through Caddy/loopback, so its proxy headers are trusted.
+      - FORWARDED_ALLOW_IPS=*
       - MCP_ENABLED=${MCP_ENABLED:-false}
       - MCP_API_KEY=${MCP_API_KEY:-}
     deploy:
@@ -44,3 +48,8 @@ services:
         limits:
           cpus: "0.20"
           memory: 128M
+
+networks:
+  caddy:
+    external: true
+    name: ${CADDY_NETWORK:-caddy_shared}

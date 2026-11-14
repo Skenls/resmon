@@ -102,11 +102,13 @@
 
 ### Caddy (HTTPS)
 
-Контейнер остаётся на `127.0.0.1:1488`, Caddy на этом же хосте проксирует на него. Добавьте в существующий Caddyfile:
+Контейнер resmon остаётся на `127.0.0.1:1488`. Если Caddy запущен на хосте — проксируйте на `127.0.0.1:1488`. Если Caddy тоже в Docker (bridge), добавьте resmon в сеть Caddy и проксируйте на `resmon_web:1488`.
 
 ```caddyfile
 resmon.185.240.121.158.sslip.io {
-    reverse_proxy 127.0.0.1:1488 {
+    # Caddy на хосте: 127.0.0.1:1488
+    # Caddy в Docker: resmon_web:1488
+    reverse_proxy resmon_web:1488 {
         flush_interval -1
     }
 
@@ -125,12 +127,22 @@ BIND_ADDR=127.0.0.1
 COOKIE_SECURE=true
 ```
 
-Проверка и перезагрузка:
+Проверка и graceful reload:
 ```bash
-sudo caddy validate --config /etc/caddy/Caddyfile
-sudo systemctl reload caddy
+# Caddy в Docker: конфиг должен быть смонтирован в контейнер
+docker exec shlyapgrader_caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+docker exec shlyapgrader_caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+
 curl -I https://resmon.185.240.121.158.sslip.io/
 ```
+
+Если Caddy в Docker и resmon ещё не в его сети:
+```bash
+docker network create caddy_shared 2>/dev/null || true
+docker network connect caddy_shared shlyapgrader_caddy
+docker network connect caddy_shared resmon_web
+```
+Сеть нужно прописать в обоих compose-файлах, иначе она пропадёт после пересоздания контейнеров.
 
 Ожидаемый ответ — `401` (нет логина), а не `502`. Порт 1488 наружу не открывайте; если правило было, удалите:
 ```bash

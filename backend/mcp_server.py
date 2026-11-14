@@ -44,6 +44,14 @@ def _downsample(points: List[Dict[str, Any]], limit: int) -> Tuple[List[Dict[str
     return [points[i] for i in indexes], True
 
 
+def _journal_dirs(settings: Settings) -> List[str]:
+    return [
+        directory
+        for directory in (settings.HOST_JOURNAL_DIR, settings.HOST_RUN_JOURNAL_DIR)
+        if os.path.isdir(directory)
+    ]
+
+
 def _journal_command(settings: Settings, lines: int, unit: Optional[str]) -> List[str]:
     command = [
         "journalctl",
@@ -52,9 +60,8 @@ def _journal_command(settings: Settings, lines: int, unit: Optional[str]) -> Lis
         "--lines",
         str(lines),
     ]
-    for directory in (settings.HOST_JOURNAL_DIR, settings.HOST_RUN_JOURNAL_DIR):
-        if os.path.isdir(directory):
-            command.extend(["--directory", directory])
+    for directory in _journal_dirs(settings):
+        command.extend(["--directory", directory])
     if unit:
         command.extend(["--unit", unit])
     return command
@@ -162,6 +169,8 @@ def create_mcp(buffer: MetricsBuffer, settings: Settings):
             }
 
         entries = completed.stdout.rstrip("\n").splitlines()
+        if entries == ["-- No entries --"]:
+            entries = []
         result: Dict[str, Any] = {
             "source": source,
             "unit": target_unit,
@@ -169,11 +178,32 @@ def create_mcp(buffer: MetricsBuffer, settings: Settings):
             "lines": entries,
         }
         if not entries:
-            result["hint"] = (
-                "No journal entries. Mount the host /var/log/journal at "
-                f"{settings.HOST_JOURNAL_DIR} (and /run/log/journal at "
-                f"{settings.HOST_RUN_JOURNAL_DIR})."
+            dirs = _journal_dirs(settings)
+            journal_files = sum(
+                1
+                for directory in dirs
+                for _, _, files in os.walk(directory)
+                for name in files
+                if name.endswith((".journal", ".journal~"))
             )
+            result["journal_dirs"] = dirs
+            result["journal_files"] = journal_files
+            if not dirs:
+                result["hint"] = (
+                    "Host journal is not mounted. Mount /var/log/journal at "
+                    f"{settings.HOST_JOURNAL_DIR} and /run/log/journal at "
+                    f"{settings.HOST_RUN_JOURNAL_DIR}, then recreate the container."
+                )
+            elif journal_files == 0:
+                result["hint"] = (
+                    "The mounted journal directories contain no .journal files. "
+                    "The host may use a different journal path."
+                )
+            else:
+                result["hint"] = (
+                    "Journal files exist but journalctl returned no entries; "
+                    "check container permissions or machine-id filtering."
+                )
         if completed.returncode != 0 and completed.stderr.strip():
             result["error"] = completed.stderr.strip()[:2000]
         return result

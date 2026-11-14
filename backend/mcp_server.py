@@ -14,7 +14,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from backend.buffer import MetricsBuffer
 from backend.config import Settings
 
-MAX_METRICS_AGE_SECONDS = 300
+MAX_METRICS_AGE_SECONDS = 900
 MAX_SERIES_POINTS = 60
 
 
@@ -100,7 +100,7 @@ def create_mcp(buffer: MetricsBuffer, settings: Settings):
         version="1.0.0",
         instructions=(
             "Read-only access to the server monitoring data. Metrics are kept for "
-            "at most 5 minutes. Logs come from the host journal (system, systemd "
+            "at most 15 minutes. Logs come from the host journal (system, systemd "
             "units, and the docker.service daemon); container stdout logs are not "
             "available."
         ),
@@ -111,7 +111,7 @@ def create_mcp(buffer: MetricsBuffer, settings: Settings):
         """Return server metrics for a required time interval.
 
         Both start and end are mandatory. Use ISO 8601 with timezone (for example
-        2026-11-14T10:00:00Z) or Unix seconds. The oldest available point is 5
+        2026-11-14T10:00:00Z) or Unix seconds. The oldest available point is 15
         minutes in the past; older ranges are clamped. At most 60 points are
         returned, evenly sampled over the interval.
         """
@@ -123,7 +123,7 @@ def create_mcp(buffer: MetricsBuffer, settings: Settings):
 
         oldest = now - MAX_METRICS_AGE_SECONDS
         if requested_end < oldest:
-            raise ValueError("metrics are retained for only 5 minutes; end is too old")
+            raise ValueError("metrics are retained for only 15 minutes; end is too old")
 
         start_ts = max(requested_start, oldest)
         end_ts = min(requested_end, now)

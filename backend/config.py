@@ -19,12 +19,41 @@ class Settings(BaseSettings):
     MCP_API_KEY: str = ""
 
     # Authentication settings
-    AUTH_ENABLED: bool = False
+    AUTH_ENABLED: bool = True
     AUTH_USERNAME: str = "admin"
     AUTH_PASSWORD: str = ""
-    SECRET_KEY: str = "resmon-default-secret-change-in-production"
+    SECRET_KEY: str = ""
+    COOKIE_SECURE: bool = False
+    MAX_WS_CLIENTS: int = 100
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+
+INSECURE_PASSWORDS = {
+    "",
+    "changeme",
+    "password",
+    "admin",
+    "changeme_to_a_strong_password",
+    "replace_with_a_long_random_password",
+}
+INSECURE_SECRET_KEYS = {
+    "",
+    "resmon-default-secret-change-in-production",
+    "change_this_to_a_random_secret_key_for_sessions",
+    "replace_with_a_random_secret_hex",
+}
+
+
+def validate_security(settings: Settings) -> None:
+    """Fail closed instead of starting with an open dashboard or forgeable sessions."""
+    if not settings.AUTH_ENABLED:
+        return
+    if settings.AUTH_PASSWORD in INSECURE_PASSWORDS:
+        raise RuntimeError("AUTH_PASSWORD is empty or a known placeholder")
+    if settings.SECRET_KEY in INSECURE_SECRET_KEYS:
+        raise RuntimeError("SECRET_KEY is empty or a known placeholder")
+
 
 _settings: Optional[Settings] = None
 

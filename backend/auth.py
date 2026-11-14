@@ -11,34 +11,45 @@ from backend.config import get_settings
 _failed_attempts: Dict[str, List[float]] = {}
 MAX_FAILED_ATTEMPTS = 10
 WINDOW_SECONDS = 60.0
+MAX_TRACKED_CLIENTS = 10_000
 COOKIE_NAME = "resmon_session"
 
 
 def get_client_ip(request: Request) -> str:
-    """Extract real client IP considering proxy headers."""
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
+    """Use the socket peer; uvicorn only applies proxy headers from trusted proxies."""
     if request.client:
         return request.client.host
     return "unknown"
 
 
+def _prune_attempts(now: float) -> None:
+    for client_ip in list(_failed_attempts):
+        attempts = [t for t in _failed_attempts[client_ip] if now - t < WINDOW_SECONDS]
+        if attempts:
+            _failed_attempts[client_ip] = attempts
+        else:
+            del _failed_attempts[client_ip]
+
+
 def is_rate_limited(client_ip: str) -> bool:
     """Return True if client_ip has exceeded MAX_FAILED_ATTEMPTS in the last WINDOW_SECONDS."""
-    now = time.time()
+    now = time.monotonic()
     attempts = _failed_attempts.get(client_ip, [])
     # Keep only timestamps within the sliding window
     valid_attempts = [t for t in attempts if now - t < WINDOW_SECONDS]
-    _failed_attempts[client_ip] = valid_attempts
+    if valid_attempts:
+        _failed_attempts[client_ip] = valid_attempts
+    else:
+        _failed_attempts.pop(client_ip, None)
     return len(valid_attempts) >= MAX_FAILED_ATTEMPTS
 
 
 def record_failed_attempt(client_ip: str) -> None:
-    now = time.time()
+    now = time.monotonic()
+    if client_ip not in _failed_attempts and len(_failed_attempts) >= MAX_TRACKED_CLIENTS:
+        _prune_attempts(now)
+        if len(_failed_attempts) >= MAX_TRACKED_CLIENTS:
+            _failed_attempts.pop(next(iter(_failed_attempts)), None)
     attempts = _failed_attempts.get(client_ip, [])
     valid_attempts = [t for t in attempts if now - t < WINDOW_SECONDS]
     valid_attempts.append(now)
@@ -72,7 +83,7 @@ def verify_session_token(token: str, expected_username: str, secret_key: str) ->
         user, expires_at_str, signature = parts
         if int(expires_at_str) < time.time():
             return False
-        if not secrets.compare_digest(user, expected_username):
+        if not secrets.compare_digest(user.encode("utf-8"), expected_username.encode("utf-8")):
             return False
         payload = f"{user}:{expires_at_str}"
         expected_signature = hmac.new(
@@ -124,8 +135,8 @@ async def authenticate_http_request(request: Request, response: Response) -> boo
 
     # 3. If credentials were provided, verify them first
     if username:
-        user_match = secrets.compare_digest(username, settings.AUTH_USERNAME)
-        pass_match = secrets.compare_digest(password, settings.AUTH_PASSWORD)
+        user_match = secrets.compare_digest(username.encode("utf-8"), settings.AUTH_USERNAME.encode("utf-8"))
+        pass_match = secrets.compare_digest(password.encode("utf-8"), settings.AUTH_PASSWORD.encode("utf-8"))
 
         if user_match and pass_match:
             # Legitimate user: reset failed counter, issue session token, and allow immediately
@@ -137,6 +148,7 @@ async def authenticate_http_request(request: Request, response: Response) -> boo
                 value=session_token,
                 httponly=True,
                 samesite="lax",
+                secure=settings.COOKIE_SECURE or request.url.scheme == "https",
                 max_age=86400,
             )
             return True
@@ -177,8 +189,8 @@ def authenticate_websocket(websocket: WebSocket) -> bool:
     auth_header = websocket.headers.get("authorization", "")
     username, password = parse_basic_auth(auth_header)
     if username and password:
-        user_match = secrets.compare_digest(username, settings.AUTH_USERNAME)
-        pass_match = secrets.compare_digest(password, settings.AUTH_PASSWORD)
+        user_match = secrets.compare_digest(username.encode("utf-8"), settings.AUTH_USERNAME.encode("utf-8"))
+        pass_match = secrets.compare_digest(password.encode("utf-8"), settings.AUTH_PASSWORD.encode("utf-8"))
         if user_match and pass_match:
             return True
 

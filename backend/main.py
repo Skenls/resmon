@@ -5,15 +5,16 @@ import logging
 import os
 import secrets
 from typing import Set
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.auth import COOKIE_NAME, authenticate_http_request, authenticate_websocket
 from backend.buffer import MetricsBuffer
 from backend.collector import SystemMetricsCollector
-from backend.config import get_settings
+from backend.config import get_settings, validate_security
 
 settings = get_settings()
 
@@ -33,19 +34,23 @@ async def metrics_collector_loop() -> None:
     logger.info("Starting background telemetry collector (interval=%.2fs)", settings.UPDATE_INTERVAL)
     while True:
         try:
-            snapshot = collector.collect_snapshot()
+            snapshot = await asyncio.to_thread(collector.collect_snapshot)
             buffer.append(snapshot)
 
-            if connected_clients:
+            clients = list(connected_clients)
+            if clients:
                 payload = json.dumps(snapshot)
-                disconnected = set()
-                for ws in connected_clients:
-                    try:
-                        await ws.send_text(payload)
-                    except Exception:
-                        disconnected.add(ws)
-                for dead_ws in disconnected:
-                    connected_clients.discard(dead_ws)
+                results = await asyncio.gather(
+                    *(asyncio.wait_for(ws.send_text(payload), timeout=2.0) for ws in clients),
+                    return_exceptions=True,
+                )
+                for ws, result in zip(clients, results):
+                    if isinstance(result, BaseException):
+                        connected_clients.discard(ws)
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
         except Exception as e:
             logger.error("Error in metrics collector tick: %s", e)
 
@@ -65,8 +70,17 @@ if settings.MCP_ENABLED:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_security(settings)
+    if not settings.AUTH_ENABLED:
+        logger.warning("AUTH_ENABLED=false: the web UI is unprotected")
+    else:
+        if len(settings.AUTH_PASSWORD) < 12:
+            logger.warning("AUTH_PASSWORD is shorter than 12 characters")
+        if len(settings.SECRET_KEY) < 32:
+            logger.warning("SECRET_KEY is shorter than 32 characters")
+
     # Prime the buffer with initial snapshot
-    init_snap = collector.collect_snapshot()
+    init_snap = await asyncio.to_thread(collector.collect_snapshot)
     buffer.append(init_snap)
 
     async with AsyncExitStack() as stack:
@@ -83,14 +97,12 @@ async def lifespan(app: FastAPI):
                 pass
 
 
-app = FastAPI(title="ResMon Web Telemetry", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = FastAPI(
+    title="ResMon Web Telemetry",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 
@@ -106,17 +118,13 @@ if mcp_server is not None:
             auth = request.headers.get("authorization", "")
             key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
             key = key or request.headers.get("x-api-key", "")
-            if not secrets.compare_digest(key, settings.MCP_API_KEY):
+            if not secrets.compare_digest(key.encode("utf-8"), settings.MCP_API_KEY.encode("utf-8")):
                 return JSONResponse(
                     {"detail": "Invalid MCP API key"},
                     status_code=401,
                     headers={"WWW-Authenticate": "Bearer"},
                 )
         return await call_next(request)
-
-
-from backend.auth import authenticate_http_request, authenticate_websocket
-from fastapi import Depends, status
 
 
 @app.get("/api/health")
@@ -138,14 +146,25 @@ async def get_history(auth: bool = Depends(authenticate_http_request)):
 async def get_snapshot(auth: bool = Depends(authenticate_http_request)):
     latest = buffer.get_latest()
     if latest is None:
-        latest = collector.collect_snapshot()
+        latest = await asyncio.to_thread(collector.collect_snapshot)
     return latest
+
+
+def _origin_allowed(websocket: WebSocket) -> bool:
+    origin = websocket.headers.get("origin")
+    if not origin:
+        return True
+    host = websocket.headers.get("host")
+    return bool(host) and urlsplit(origin).netloc == host
 
 
 @app.websocket("/ws/metrics")
 async def websocket_metrics(websocket: WebSocket):
-    if not authenticate_websocket(websocket):
+    if not authenticate_websocket(websocket) or not _origin_allowed(websocket):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    if len(connected_clients) >= settings.MAX_WS_CLIENTS:
+        await websocket.close(code=status.WS_1013_TRY_AGAIN_LATER)
         return
 
     await websocket.accept()
@@ -154,7 +173,7 @@ async def websocket_metrics(websocket: WebSocket):
     # Immediately push latest snapshot upon connection
     latest = buffer.get_latest()
     if latest is None:
-        latest = collector.collect_snapshot()
+        latest = await asyncio.to_thread(collector.collect_snapshot)
         buffer.append(latest)
     try:
         await websocket.send_text(json.dumps(latest))
@@ -179,26 +198,36 @@ if mcp_app is not None:
     app.mount("/mcp", mcp_app)
 
 
-from backend.auth import authenticate_http_request, authenticate_websocket, COOKIE_NAME
-from fastapi import Depends, Request, status
-
-
 # Mount frontend distribution directory if built
 dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../frontend/dist"))
+
+
+def resolve_spa_file(full_path: str) -> str:
+    root = os.path.realpath(dist_dir)
+    try:
+        candidate = os.path.realpath(os.path.join(root, full_path))
+        inside = os.path.commonpath([root, candidate]) == root
+    except (OSError, ValueError):
+        inside = False
+        candidate = ""
+    if not inside or not os.path.isfile(candidate):
+        candidate = os.path.join(root, "index.html")
+    return candidate
+
+
 if os.path.isdir(dist_dir):
     app.mount("/assets", StaticFiles(directory=os.path.join(dist_dir, "assets")), name="assets")
 
     @app.get("/{full_path:path}")
-    async def serve_spa(request: Request, full_path: str, auth: bool = Depends(authenticate_http_request)):
-        file_path = os.path.join(dist_dir, full_path)
-        target = file_path if (os.path.exists(file_path) and os.path.isfile(file_path)) else os.path.join(dist_dir, "index.html")
-        resp = FileResponse(target)
+    async def serve_spa(request: Request, full_path: str, _auth: bool = Depends(authenticate_http_request)):
+        resp = FileResponse(resolve_spa_file(full_path))
         if hasattr(request.state, "session_token"):
             resp.set_cookie(
                 key=COOKIE_NAME,
                 value=request.state.session_token,
                 httponly=True,
                 samesite="lax",
+                secure=settings.COOKIE_SECURE or request.url.scheme == "https",
                 max_age=86400,
             )
         return resp

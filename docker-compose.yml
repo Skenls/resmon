@@ -6,7 +6,7 @@ services:
     container_name: resmon_web
     restart: unless-stopped
     ports:
-      # Loopback only: access via SSH tunnel or Tailscale, never expose this port publicly.
+      # Loopback only: Caddy on the same host terminates TLS and proxies here.
       - "${BIND_ADDR:-127.0.0.1}:${PORT:-8080}:${PORT:-8080}"
     read_only: true
     tmpfs:

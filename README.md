@@ -48,7 +48,7 @@
    http://localhost:8080
    ```
 
-По умолчанию контейнер слушает только `127.0.0.1` (`BIND_ADDR=127.0.0.1`), поэтому с другого компьютера нужен SSH-туннель или Tailscale — см. раздел «Без Caddy».
+По умолчанию контейнер слушает только `127.0.0.1` (`BIND_ADDR=127.0.0.1`). Публичный доступ — через существующий Caddy reverse proxy, см. раздел «Caddy».
 
 *(Для изменения порта отредактируйте `PORT` в файле `.env`).*
 
@@ -84,7 +84,7 @@
 
 ## 🔒 Безопасность и авторизация
 
-Сервис не публикует порт наружу: `BIND_ADDR=127.0.0.1`. Доступ с другого компьютера — только через SSH-туннель или Tailscale. Так Basic-пароль и MCP-ключ не ходят по открытому HTTP, и Caddy не нужен.
+Сервис не публикует порт наружу: `BIND_ADDR=127.0.0.1`. Публичный доступ — через существующий Caddy по HTTPS. Так Basic-пароль и MCP-ключ не ходят по открытому HTTP.
 
 1. Задайте в `.env`:
    ```env
@@ -100,23 +100,44 @@
    - **Защита от брутфорса**: 10 неверных попыток с одного IP за 60 секунд → HTTP 429. `X-Forwarded-For` от клиента не принимается.
    - Сравнение учётных данных — constant-time; не-ASCII пароли не вызывают 500.
 
-### Без Caddy: SSH-туннель
+### Caddy (HTTPS)
 
-На клиенте (там, где браузер и OpenCode; замените `1488`, если у вас другой `PORT`):
-```bash
-ssh -N -L 1488:127.0.0.1:1488 <user>@185.240.121.158
+Контейнер остаётся на `127.0.0.1:1488`, Caddy на этом же хосте проксирует на него. Добавьте в существующий Caddyfile:
+
+```caddyfile
+resmon.185.240.121.158.sslip.io {
+    reverse_proxy 127.0.0.1:1488 {
+        flush_interval -1
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+    }
+}
 ```
-Оставьте команду запущенной и открывайте:
-- веб: `http://127.0.0.1:1488`
-- MCP: `http://127.0.0.1:1488/mcp`
 
-SSH шифрует трафик, порт 1488 на сервере остаётся закрытым. На сервере удалите публичное правило:
+В `.env`:
+```env
+BIND_ADDR=127.0.0.1
+COOKIE_SECURE=true
+```
+
+Проверка и перезагрузка:
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+curl -I https://resmon.185.240.121.158.sslip.io/
+```
+
+Ожидаемый ответ — `401` (нет логина), а не `502`. Порт 1488 наружу не открывайте; если правило было, удалите:
 ```bash
 sudo ufw delete allow 1488/tcp
 ```
-Docker публикует порты в обход UFW, поэтому защита — именно `BIND_ADDR=127.0.0.1`, а не только правило UFW.
 
-Для постоянного туннеля используйте `autossh`, systemd-юнит или LaunchAgent. Если нужен доступ без ручного туннеля — поставьте **Tailscale** на сервер и клиент и задайте `BIND_ADDR` равным Tailscale-IP сервера (не `0.0.0.0` — Docker обходит UFW); MCP будет доступен по `http://100.x.y.z:1488/mcp` внутри tailnet.
+Если Caddy запущен в Docker-контейнере без `network_mode: host`, `127.0.0.1` указывает на сам контейнер Caddy. В этом случае используйте `network_mode: host` у Caddy либо общую Docker-сеть и адрес `resmon:1488`.
 
 ---
 
@@ -129,15 +150,15 @@ MCP встроен в тот же процесс FastAPI и доступен п�
 1. Добавьте в `.env`:
    ```env
    MCP_ENABLED=true
-   MCP_API_KEY=длинный_случайный_ключ
+   MCP_API_KEY=<openssl rand -hex 32>
    ```
 2. Перезапустите контейнер:
    ```bash
    docker compose up -d --build
    ```
-3. При запущенном SSH-туннеле проверьте, что endpoint отвечает без ключа `401`:
+3. Проверьте, что endpoint отвечает без ключа `401`:
    ```bash
-   curl -i http://127.0.0.1:1488/mcp
+   curl -i https://resmon.185.240.121.158.sslip.io/mcp
    ```
 
 `MCP_API_KEY` обязателен: при `MCP_ENABLED=true` и пустом ключе MCP остаётся выключенным. Ключ передаётся в заголовке `Authorization: Bearer <ключ>` или `X-API-Key: <ключ>`. Авторизация веб-интерфейса (`AUTH_ENABLED`) на MCP не распространяется — у него отдельный ключ.
@@ -175,7 +196,7 @@ MCP встроен в тот же процесс FastAPI и доступен п�
     "servers": {
       "resmon": {
         "type": "remote",
-        "url": "http://127.0.0.1:1488/mcp",
+        "url": "https://resmon.185.240.121.158.sslip.io/mcp",
         "headers": {
           "Authorization": "Bearer {env:RESMON_MCP_KEY}"
         }
@@ -192,7 +213,7 @@ export RESMON_MCP_KEY='тот_же_ключ_что_в_MCP_API_KEY'
 opencode mcp list
 ```
 
-После этого инструменты `resmon_get_metrics` и `resmon_get_logs` появятся у агента. OpenCode ходит на `127.0.0.1:1488`, поэтому SSH-туннель должен быть запущен до старта OpenCode. Если используется Tailscale, замените URL на `http://100.x.y.z:1488/mcp`.
+После этого инструменты `resmon_get_metrics` и `resmon_get_logs` появятся у агента. OpenCode ходит на публичный HTTPS-URL через Caddy; отдельный туннель не нужен.
 
 ---
 

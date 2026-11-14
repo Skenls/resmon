@@ -226,6 +226,64 @@ export const NetworkSection: React.FC<NetworkSectionProps> = ({ history, latest 
             </tbody>
           </table>
         </div>
+
+        {/* UFW Allowed Ports (read-only) */}
+        <div className="pt-4 mt-2 border-t border-slate-800">
+          <div className="flex items-center gap-2 mb-3">
+            <Shield className="w-4 h-4 text-cyan-400" />
+            <h3 className="text-sm font-semibold text-slate-200 font-mono uppercase tracking-wider">
+              UFW Allowed Ports ({net.ufw?.rules?.length || 0})
+            </h3>
+            {net.ufw?.available && (
+              <span
+                className={`px-1.5 py-0.5 rounded text-[10px] font-mono uppercase border ${
+                  net.ufw.enabled
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : 'bg-slate-800 text-slate-400 border-slate-700'
+                }`}
+              >
+                {net.ufw.enabled ? 'enabled' : 'disabled'}
+              </span>
+            )}
+          </div>
+
+          {net.ufw?.available ? (
+            <div className="overflow-x-auto rounded-lg border border-slate-800 max-h-44 overflow-y-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="bg-slate-900/90 text-slate-400 uppercase text-[10px] sticky top-0 border-b border-slate-800">
+                  <tr>
+                    <th className="py-2 px-3">Action</th>
+                    <th className="py-2 px-3">Proto</th>
+                    <th className="py-2 px-3">Port</th>
+                    <th className="py-2 px-3">From</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 bg-slate-950/40">
+                  {net.ufw.rules.length > 0 ? (
+                    net.ufw.rules.map((rule, idx) => (
+                      <tr key={idx} className="hover:bg-slate-800/30 transition-colors">
+                        <td className="py-2 px-3 text-emerald-400 uppercase">{rule.action}</td>
+                        <td className="py-2 px-3 uppercase text-slate-300">{rule.proto}</td>
+                        <td className="py-2 px-3 font-bold text-cyan-400">{rule.port}</td>
+                        <td className="py-2 px-3 text-slate-400">{rule.from}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={4} className="py-4 text-center text-slate-500 italic">
+                        No allowed ports configured
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-xs text-slate-500 italic py-2">
+              UFW config not available (mount /etc/ufw at /host/etc/ufw)
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

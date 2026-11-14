@@ -1,8 +1,9 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 import json
 import logging
 import os
+import secrets
 from typing import Set
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -51,19 +52,35 @@ async def metrics_collector_loop() -> None:
         await asyncio.sleep(settings.UPDATE_INTERVAL)
 
 
+mcp_server = None
+mcp_app = None
+if settings.MCP_ENABLED:
+    if not settings.MCP_API_KEY:
+        logger.warning("MCP_ENABLED is true but MCP_API_KEY is empty; MCP stays disabled")
+    else:
+        from backend.mcp_server import create_mcp
+
+        mcp_server, mcp_app = create_mcp(buffer, settings)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Prime the buffer with initial snapshot
     init_snap = collector.collect_snapshot()
     buffer.append(init_snap)
 
-    task = asyncio.create_task(metrics_collector_loop())
-    yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    async with AsyncExitStack() as stack:
+        if mcp_server is not None:
+            await stack.enter_async_context(mcp_server.session_manager.run())
+        task = asyncio.create_task(metrics_collector_loop())
+        try:
+            yield
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="ResMon Web Telemetry", lifespan=lifespan)
@@ -75,6 +92,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+if mcp_server is not None:
+
+    @app.middleware("http")
+    async def mcp_api_key_guard(request, call_next):
+        path = request.url.path
+        if path == "/mcp":
+            request.scope["path"] = "/mcp/"
+            path = "/mcp/"
+        if path.startswith("/mcp/"):
+            auth = request.headers.get("authorization", "")
+            key = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+            key = key or request.headers.get("x-api-key", "")
+            if not secrets.compare_digest(key, settings.MCP_API_KEY):
+                return JSONResponse(
+                    {"detail": "Invalid MCP API key"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        return await call_next(request)
 
 
 from backend.auth import authenticate_http_request, authenticate_websocket
@@ -135,6 +173,10 @@ async def websocket_metrics(websocket: WebSocket):
         logger.debug("WebSocket error: %s", e)
     finally:
         connected_clients.discard(websocket)
+
+
+if mcp_app is not None:
+    app.mount("/mcp", mcp_app)
 
 
 from backend.auth import authenticate_http_request, authenticate_websocket, COOKIE_NAME

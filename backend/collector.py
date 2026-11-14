@@ -1,7 +1,8 @@
 import os
 import platform
+import socket
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import psutil
 
 from backend.config import get_settings
@@ -35,6 +36,160 @@ def parse_psi_file(content: Optional[str]) -> Dict[str, Dict[str, float]]:
     return result
 
 
+_TCP_STATE_NAMES = {
+    "01": "ESTABLISHED",
+    "02": "SYN_SENT",
+    "03": "SYN_RECV",
+    "04": "FIN_WAIT1",
+    "05": "FIN_WAIT2",
+    "06": "TIME_WAIT",
+    "07": "CLOSE",
+    "08": "CLOSE_WAIT",
+    "09": "LAST_ACK",
+    "0A": "LISTEN",
+    "0B": "CLOSING",
+}
+
+
+def _decode_proc_net_address(value: str) -> Tuple[str, int]:
+    address_hex, port_hex = value.split(":")
+    raw = bytes.fromhex(address_hex)
+    if len(raw) == 4:
+        address = socket.inet_ntop(socket.AF_INET, raw[::-1])
+    else:
+        address = socket.inet_ntop(
+            socket.AF_INET6,
+            b"".join(raw[offset : offset + 4][::-1] for offset in range(0, 16, 4)),
+        )
+    return address, int(port_hex, 16)
+
+
+def parse_proc_net_tables(
+    proc_root: str,
+) -> Optional[Tuple[List[Dict[str, Any]], Dict[str, int]]]:
+    """Read sockets from the host network namespace via /proc/1/net."""
+    net_root = os.path.join(proc_root, "1", "net")
+    listening: List[Dict[str, Any]] = []
+    counts = {
+        name: 0
+        for name in (
+            "ESTABLISHED",
+            "SYN_SENT",
+            "SYN_RECV",
+            "FIN_WAIT1",
+            "FIN_WAIT2",
+            "TIME_WAIT",
+            "CLOSE",
+            "CLOSE_WAIT",
+            "LAST_ACK",
+            "LISTEN",
+            "CLOSING",
+            "OTHER",
+        )
+    }
+    found = False
+    for table in ("tcp", "tcp6", "udp", "udp6"):
+        try:
+            with open(os.path.join(net_root, table), "r", encoding="utf-8") as handle:
+                next(handle, None)
+                for line in handle:
+                    fields = line.split()
+                    if len(fields) < 10:
+                        continue
+                    found = True
+                    proto = table.rstrip("6")
+                    state = fields[3]
+                    if proto == "tcp":
+                        counts[_TCP_STATE_NAMES.get(state, "OTHER")] += 1
+                    else:
+                        counts["OTHER"] += 1
+                    is_listener = (proto == "tcp" and state == "0A") or (
+                        proto == "udp" and state == "07"
+                    )
+                    if not is_listener:
+                        continue
+                    try:
+                        address, port = _decode_proc_net_address(fields[1])
+                    except (ValueError, OSError):
+                        continue
+                    listening.append(
+                        {
+                            "port": port,
+                            "address": address,
+                            "proto": proto,
+                            "family": "IPv6" if "6" in table else "IPv4",
+                            "status": "LISTEN" if proto == "tcp" else "UNCONN",
+                            "_inode": fields[9],
+                        }
+                    )
+        except OSError:
+            continue
+    if not found:
+        return None
+    return listening, counts
+
+
+def parse_ufw_rules(ufw_dir: str) -> Dict[str, Any]:
+    """Parse read-only UFW configuration. Only allow/limit tuples are returned."""
+    result: Dict[str, Any] = {"available": False, "enabled": False, "rules": []}
+    try:
+        with open(os.path.join(ufw_dir, "ufw.conf"), "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip().startswith("ENABLED="):
+                    result["enabled"] = line.split("=", 1)[1].strip().lower() in (
+                        "yes",
+                        "true",
+                        "1",
+                    )
+                    break
+    except OSError:
+        pass
+
+    rules: List[Dict[str, str]] = []
+    seen = set()
+    for filename in ("user.rules", "user6.rules"):
+        try:
+            with open(os.path.join(ufw_dir, filename), "r", encoding="utf-8") as handle:
+                content = handle.read()
+        except OSError:
+            continue
+        result["available"] = True
+        for line in content.splitlines():
+            if not line.startswith("### tuple ###"):
+                continue
+            parts = line.split()
+            if len(parts) < 10:
+                continue
+            action, proto, port, to_addr, _sport, from_addr, direction = parts[3:10]
+            if action.lower() not in ("allow", "limit"):
+                continue
+            key = (action, proto, port, from_addr, to_addr, direction)
+            if key in seen:
+                continue
+            seen.add(key)
+            rules.append(
+                {
+                    "action": action,
+                    "proto": proto,
+                    "port": port,
+                    "from": from_addr,
+                    "to": to_addr,
+                    "direction": direction,
+                }
+            )
+    rules.sort(
+        key=lambda rule: (
+            int(rule["port"].split(":")[0])
+            if rule["port"].split(":")[0].isdigit()
+            else 65536,
+            rule["proto"],
+            rule["port"],
+        )
+    )
+    result["rules"] = rules
+    return result
+
+
 class SystemMetricsCollector:
     """
     Ultra-low-overhead Linux system telemetry collector.
@@ -60,6 +215,10 @@ class SystemMetricsCollector:
 
         # Process name cache by PID to avoid repeated name lookup overhead
         self._pid_name_cache: Dict[int, str] = {}
+        self._host_socket_owners: Dict[str, int] = {}
+        self._host_socket_owners_time = 0.0
+        self._ufw_cache: Optional[Dict[str, Any]] = None
+        self._ufw_cache_time = 0.0
 
         # Cache static info
         self._static_info = self._gather_static_info()
@@ -180,8 +339,74 @@ class SystemMetricsCollector:
         self._cached_partitions = partitions
         return partitions
 
+    def _process_name(self, pid: Optional[int]) -> str:
+        if not pid:
+            return "unknown"
+        if pid in self._pid_name_cache:
+            return self._pid_name_cache[pid]
+        try:
+            pname = psutil.Process(pid).name()
+            self._pid_name_cache[pid] = pname
+            return pname
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return "unknown"
+
+    def _host_socket_owner_map(self) -> Dict[str, int]:
+        """Map socket inodes to host PIDs; cached because fd scans are expensive."""
+        now = time.monotonic()
+        if self._host_socket_owners and now - self._host_socket_owners_time < 10:
+            return self._host_socket_owners
+
+        owners: Dict[str, int] = {}
+        try:
+            proc_entries = os.scandir(self.host_proc)
+        except OSError:
+            return {}
+        with proc_entries:
+            for entry in proc_entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    fd_entries = os.scandir(os.path.join(entry.path, "fd"))
+                except OSError:
+                    continue
+                with fd_entries:
+                    for fd in fd_entries:
+                        try:
+                            target = os.readlink(fd.path)
+                        except OSError:
+                            continue
+                        if target.startswith("socket:["):
+                            owners[target[8:-1]] = int(entry.name)
+
+        self._host_socket_owners = owners
+        self._host_socket_owners_time = now
+        return owners
+
+    def _get_ufw(self) -> Dict[str, Any]:
+        now = time.monotonic()
+        if self._ufw_cache is None or now - self._ufw_cache_time > 5:
+            self._ufw_cache = parse_ufw_rules(self.settings.HOST_UFW)
+            self._ufw_cache_time = now
+        return self._ufw_cache
+
     def _get_network_connections_and_ports(self) -> Dict[str, Any]:
-        """Collect active connections summary and listening ports."""
+        """Collect host-wide connections/ports from the host netns when available."""
+        host_tables = parse_proc_net_tables(self.host_proc)
+        if host_tables is not None:
+            listening_ports, conn_counts = host_tables
+            owners = self._host_socket_owner_map() if listening_ports else {}
+            for port in listening_ports:
+                pid = owners.get(port.pop("_inode", ""))
+                port["pid"] = pid
+                port["process"] = self._process_name(pid)
+            listening_ports.sort(key=lambda x: (x["port"], x["proto"]))
+            return {
+                "connections_count": conn_counts,
+                "listening_ports": listening_ports,
+                "ufw": self._get_ufw(),
+            }
+
         conn_counts: Dict[str, int] = {
             "ESTABLISHED": 0,
             "LISTEN": 0,
@@ -209,18 +434,9 @@ class SystemMetricsCollector:
 
             if status == "LISTEN" and conn.laddr:
                 pid = conn.pid
-                pname = "unknown"
+                pname = self._process_name(pid)
                 if pid:
                     active_pids.add(pid)
-                    if pid in self._pid_name_cache:
-                        pname = self._pid_name_cache[pid]
-                    else:
-                        try:
-                            proc = psutil.Process(pid)
-                            pname = proc.name()
-                            self._pid_name_cache[pid] = pname
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pname = "unknown"
 
                 proto = "tcp" if conn.type == 1 else ("udp" if conn.type == 2 else "other")
                 listening_ports.append({
@@ -235,12 +451,12 @@ class SystemMetricsCollector:
         if len(self._pid_name_cache) > 200:
             self._pid_name_cache = {pid: name for pid, name in self._pid_name_cache.items() if pid in active_pids}
 
-        # Sort listening ports by port number
         listening_ports.sort(key=lambda x: x["port"])
 
         return {
             "connections_count": conn_counts,
             "listening_ports": listening_ports,
+            "ufw": self._get_ufw(),
         }
 
     def collect_snapshot(self) -> Dict[str, Any]:
@@ -351,5 +567,6 @@ class SystemMetricsCollector:
                 "packets_tx_sec": round(packets_tx_sec, 1),
                 "connections_count": net_conns["connections_count"],
                 "listening_ports": net_conns["listening_ports"],
+                "ufw": net_conns["ufw"],
             },
         }

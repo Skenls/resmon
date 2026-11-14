@@ -14,6 +14,9 @@ services:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /etc/os-release:/host/etc/os-release:ro
+      - /etc/ufw:/host/etc/ufw:ro
+      - /var/log/journal:/host/var/log/journal:ro
+      - /run/log/journal:/host/run/log/journal:ro
     environment:
       - PORT=${PORT:-8080}
       - HOST=${HOST:-0.0.0.0}
@@ -26,6 +29,8 @@ services:
       - AUTH_USERNAME=${AUTH_USERNAME:-admin}
       - AUTH_PASSWORD=${AUTH_PASSWORD:-}
       - SECRET_KEY=${SECRET_KEY:-resmon-default-secret-change-in-production}
+      - MCP_ENABLED=${MCP_ENABLED:-false}
+      - MCP_API_KEY=${MCP_API_KEY:-}
     deploy:
       resources:
         limits:

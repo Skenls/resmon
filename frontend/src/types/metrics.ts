@@ -58,6 +58,20 @@ export interface ListeningPort {
   process: string;
 }
 
+export interface UfwRule {
+  action: string;
+  proto: string;
+  port: string;
+  from: string;
+  to: string;
+}
+
+export interface UfwStatus {
+  available: boolean;
+  enabled: boolean;
+  rules: UfwRule[];
+}
+
 export interface NetworkMetrics {
   rx_kbs: number;
   tx_kbs: number;
@@ -73,6 +87,7 @@ export interface NetworkMetrics {
     [key: string]: number | undefined;
   };
   listening_ports: ListeningPort[];
+  ufw: UfwStatus;
 }
 
 export interface Snapshot {

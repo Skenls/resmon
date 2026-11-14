@@ -8,8 +8,15 @@ class Settings(BaseSettings):
     UPDATE_INTERVAL: float = 1.0
     HISTORY_POINTS: int = 900
     HOST_PROC: str = "/host/proc" if os.path.exists("/host/proc") else "/proc"
+    HOST_UFW: str = "/host/etc/ufw"
+    HOST_JOURNAL_DIR: str = "/host/var/log/journal"
+    HOST_RUN_JOURNAL_DIR: str = "/host/run/log/journal"
     HOST_SYS: str = "/host/sys" if os.path.exists("/host/sys") else "/sys"
     LOG_LEVEL: str = "info"
+
+    # MCP settings
+    MCP_ENABLED: bool = False
+    MCP_API_KEY: str = ""
 
     # Authentication settings
     AUTH_ENABLED: bool = False
